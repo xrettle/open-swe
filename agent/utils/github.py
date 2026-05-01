@@ -260,6 +260,28 @@ async def create_github_pr(
                 if token != tokens_to_try[-1]:
                     logger.info("Retrying PR creation with installation token")
                     continue
+
+                try:
+                    existing_pr_url, existing_pr_number = await _find_existing_pr(
+                        http_client=http_client,
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                        github_token=token,
+                        head_branch=head_branch,
+                    )
+                    if existing_pr_url:
+                        await _add_label(
+                            http_client,
+                            repo_owner,
+                            repo_name,
+                            label_tok,
+                            existing_pr_number,
+                        )
+                        logger.info("Found existing PR after HTTP error: %s", existing_pr_url)
+                        return existing_pr_url, existing_pr_number, True
+                except Exception:
+                    logger.exception("Failed to find existing PR after HTTP error")
+
                 return None, None, False
 
     return None, None, False
