@@ -24,6 +24,7 @@ from ..utils.github import (
     git_has_uncommitted_changes,
     git_has_unpushed_commits,
     git_push,
+    is_permanent_github_push_failure,
 )
 from ..utils.github_app import get_github_app_installation_token
 from ..utils.github_token import get_github_token
@@ -200,9 +201,20 @@ def commit_and_open_pr(
 
         push_result = git_push(sandbox_backend, repo_dir, target_branch)
         if push_result.exit_code != 0:
+            push_output = push_result.output.strip()
+            if is_permanent_github_push_failure(push_output):
+                return {
+                    "success": False,
+                    "error": (
+                        f"PERMANENT_FAILURE: do not retry. Git push was rejected with a 403 "
+                        f"permission denied error — the token does not have write access to this "
+                        f"repository. Report this to the user and stop. Details: {push_output}"
+                    ),
+                    "pr_url": None,
+                }
             return {
                 "success": False,
-                "error": f"Git push failed: {push_result.output.strip()}",
+                "error": f"Git push failed: {push_output}",
                 "pr_url": None,
             }
 
