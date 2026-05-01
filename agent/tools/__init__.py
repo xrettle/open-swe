@@ -2,6 +2,7 @@ from .commit_and_open_pr import commit_and_open_pr
 from .fetch_url import fetch_url
 from .get_branch_name import get_branch_name
 from .get_pr_review_comments import get_pr_review_comments
+from .github_ci import get_pr_check_runs, rerun_failed_workflow_runs
 from .github_comment import github_comment
 from .github_review import (
     create_pr_review,
@@ -31,20 +32,22 @@ __all__ = [
     "dismiss_pr_review",
     "fetch_url",
     "get_branch_name",
+    "get_pr_check_runs",
     "get_pr_review",
     "get_pr_review_comments",
     "github_comment",
     "http_request",
     "linear_comment",
-    "list_pr_review_comments",
-    "list_pr_reviews",
     "linear_create_issue",
     "linear_delete_issue",
     "linear_get_issue",
     "linear_get_issue_comments",
     "linear_list_teams",
     "linear_update_issue",
+    "list_pr_review_comments",
+    "list_pr_reviews",
     "list_repos",
+    "rerun_failed_workflow_runs",
     "slack_read_thread_messages",
     "slack_thread_reply",
     "submit_pr_review",
