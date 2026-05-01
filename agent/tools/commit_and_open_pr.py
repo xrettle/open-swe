@@ -34,6 +34,16 @@ from ..utils.sandbox_state import get_sandbox_backend_sync
 logger = logging.getLogger(__name__)
 
 
+def _is_workflow_scope_push_failure(output: str) -> bool:
+    normalized_output = output.lower()
+    return "workflows" in normalized_output and (
+        "scope" in normalized_output
+        or "permission" in normalized_output
+        or "workflow can be created or updated" in normalized_output
+        or "create or update workflow" in normalized_output
+    )
+
+
 def commit_and_open_pr(
     title: str,
     body: str,
@@ -124,7 +134,11 @@ def commit_and_open_pr(
         thread_id = configurable.get("thread_id")
 
         if not thread_id:
-            return {"success": False, "error": "Missing thread_id in config", "pr_url": None}
+            return {
+                "success": False,
+                "error": "Missing thread_id in config",
+                "pr_url": None,
+            }
 
         repo_config = configurable.get("repo", {})
         repo_owner = repo_config.get("owner")
@@ -138,7 +152,11 @@ def commit_and_open_pr(
 
         sandbox_backend = get_sandbox_backend_sync(thread_id)
         if not sandbox_backend:
-            return {"success": False, "error": "No sandbox found for thread", "pr_url": None}
+            return {
+                "success": False,
+                "error": "No sandbox found for thread",
+                "pr_url": None,
+            }
 
         repo_dir = resolve_repo_dir(sandbox_backend, repo_name)
         github_token = get_github_token()
@@ -202,6 +220,16 @@ def commit_and_open_pr(
         push_result = git_push(sandbox_backend, repo_dir, target_branch)
         if push_result.exit_code != 0:
             push_output = push_result.output.strip()
+            if _is_workflow_scope_push_failure(push_output):
+                return {
+                    "success": False,
+                    "error": (
+                        "Git push failed: the branch contains changes to .github/workflows/ files "
+                        "that require the 'workflows' GitHub token scope, which is not available. "
+                        "Remove any .github/workflows/ file changes from your commit and try again."
+                    ),
+                    "pr_url": None,
+                }
             if is_permanent_github_push_failure(push_output):
                 return {
                     "success": False,
