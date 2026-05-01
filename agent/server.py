@@ -28,6 +28,7 @@ from langsmith.sandbox import SandboxClientError
 
 from .integrations.langsmith import _configure_github_proxy
 from .middleware import (
+    SanitizeToolInputsMiddleware,
     ToolErrorMiddleware,
     check_message_queue_before_model,
     ensure_no_empty_msg,
@@ -324,6 +325,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         ],
         backend=sandbox_backend,
         middleware=[
+            SanitizeToolInputsMiddleware(),
             ModelCallLimitMiddleware(run_limit=60, exit_behavior="end"),
             ToolErrorMiddleware(),
             check_message_queue_before_model,
