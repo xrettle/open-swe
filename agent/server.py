@@ -257,10 +257,10 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             metadata={"sandbox_id": sandbox_backend.id},
         )
 
-        await asyncio.to_thread(
-            sandbox_backend.execute,
-            "git config --global user.name 'open-swe[bot]' && git config --global user.email 'open-swe@users.noreply.github.com'",
-        )
+    await asyncio.to_thread(
+        sandbox_backend.execute,
+        "git config --global user.name 'open-swe[bot]' && git config --global user.email 'open-swe@users.noreply.github.com'",
+    )
 
     linear_issue = config["configurable"].get("linear_issue", {})
     linear_project_id = linear_issue.get("linear_project_id", "")
