@@ -2,7 +2,8 @@
 
 Pairwise matches each agent-emitted candidate against each golden comment using
 claude-opus-4-5 (the model martian used to score Devin Review). Returns
-precision/recall/f1 per example, plus aggregate metrics across the experiment.
+precision/recall/f1 per example, plus aggregate micro/macro metrics across
+the experiment via a summary evaluator.
 
 The judge prompt is kept verbatim from
 withmartian/code-review-benchmark `step3_judge_comments.py` so scores are
@@ -12,10 +13,11 @@ directly comparable to martian's published numbers.
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
+from uuid import UUID
 
 from langchain_anthropic import ChatAnthropic
-from langsmith.evaluation import EvaluationResult
 from langsmith.schemas import Example, Run
 
 JUDGE_MODEL = "claude-opus-4-5"
@@ -87,28 +89,46 @@ def _judge_pair(golden: dict, candidate: dict) -> dict[str, Any]:
         return {"match": False, "confidence": 0.0, "reasoning": f"unparseable: {raw[:200]}"}
 
 
-def judge_match(run: Run, example: Example) -> EvaluationResult:
-    """Per-example evaluator: compute precision/recall/f1 against golden comments."""
+_PER_EXAMPLE_COUNTS: dict[UUID, dict[str, int | float]] = {}
+_COUNTS_LOCK = threading.Lock()
+
+
+def _record_counts(example_id: UUID, counts: dict[str, int | float]) -> None:
+    with _COUNTS_LOCK:
+        _PER_EXAMPLE_COUNTS[example_id] = counts
+
+
+def _drain_counts() -> list[dict[str, int | float]]:
+    with _COUNTS_LOCK:
+        snapshot = list(_PER_EXAMPLE_COUNTS.values())
+        _PER_EXAMPLE_COUNTS.clear()
+    return snapshot
+
+
+def judge_match(run: Run, example: Example) -> dict[str, Any]:
+    """Per-example evaluator: compute precision/recall/f1/tp/fp/fn against goldens.
+
+    Stashes the raw counts on a process-local cache keyed by ``example.id`` so
+    ``aggregate_pr`` can compute micro-averages without re-judging.
+    """
     candidates: list[dict] = list((run.outputs or {}).get("comments") or [])
     goldens: list[dict] = list((example.outputs or {}).get("golden_comments") or [])
 
     if not goldens:
-        return EvaluationResult(key="f1", score=None, comment="no goldens")
+        return {"results": [{"key": "f1", "score": None, "comment": "no goldens"}]}
 
     matched_goldens: set[int] = set()
     matched_candidates: set[int] = set()
-    pair_results: list[dict] = []
 
     for ci, cand in enumerate(candidates):
         for gi, gold in enumerate(goldens):
             if gi in matched_goldens:
                 continue
             res = _judge_pair(gold, cand)
-            pair_results.append({"candidate_idx": ci, "golden_idx": gi, **res})
             if res.get("match"):
                 matched_goldens.add(gi)
                 matched_candidates.add(ci)
-                break  # candidate consumed; move to next candidate
+                break
 
     tp = len(matched_goldens)
     fp = max(0, len(candidates) - len(matched_candidates))
@@ -117,66 +137,63 @@ def judge_match(run: Run, example: Example) -> EvaluationResult:
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
 
-    return EvaluationResult(
-        key="f1",
-        score=f1,
-        comment=f"P={precision:.2f} R={recall:.2f} TP={tp} FP={fp} FN={fn}",
-        evaluator_info={"model": JUDGE_MODEL},
-        extra={
-            "precision": precision,
-            "recall": recall,
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
-            "n_candidates": len(candidates),
-            "n_goldens": len(goldens),
-            "pairs": pair_results,
-        },
+    _record_counts(
+        example.id,
+        {"tp": tp, "fp": fp, "fn": fn, "precision": precision, "recall": recall, "f1": f1},
     )
 
+    return {
+        "results": [
+            {"key": "f1", "score": f1},
+            {"key": "precision", "score": precision},
+            {"key": "recall", "score": recall},
+            {"key": "tp", "score": tp},
+            {"key": "fp", "score": fp},
+            {"key": "fn", "score": fn},
+            {"key": "n_candidates", "score": len(candidates)},
+            {"key": "n_goldens", "score": len(goldens)},
+        ]
+    }
 
-def aggregate_pr(runs: list[Run], examples: list[Example]) -> list[EvaluationResult]:
-    """Summary evaluator: micro- and macro-averaged precision/recall across the experiment."""
-    micro_tp = micro_fp = micro_fn = 0
-    p_macro: list[float] = []
-    r_macro: list[float] = []
 
-    for run in runs:
-        feedback = next(
-            (f for f in (run.feedback_stats or {}).values() if isinstance(f, dict)), None
-        )
-        # Pull per-example numbers off the run's evaluator extras when available.
-        # We re-judge below if extras are unavailable to keep this evaluator pure.
-        extras = None
-        for ev in run.outputs and run.outputs.get("__evaluator_extras__", []) or []:
-            if ev.get("key") == "f1":
-                extras = ev.get("extra")
-                break
-        if not extras:
-            continue
-        micro_tp += extras["tp"]
-        micro_fp += extras["fp"]
-        micro_fn += extras["fn"]
-        p_macro.append(extras["precision"])
-        r_macro.append(extras["recall"])
-        del feedback  # unused; reserved for future LangSmith API
+def _f1(p: float, r: float) -> float:
+    return 2 * p * r / (p + r) if (p + r) else 0.0
 
-    if not p_macro:
-        return []
+
+def aggregate_pr(runs: list[Run], examples: list[Example]) -> dict[str, Any]:
+    """Summary evaluator: micro/macro precision-recall-F1 across the experiment.
+
+    Reads the per-example counts that ``judge_match`` stashed in the
+    process-local cache. Falls back to an empty result set if the cache
+    is empty (e.g. summary evaluator ran in a different process).
+    """
+    counts = _drain_counts()
+    if not counts:
+        return {"results": []}
+
+    micro_tp = sum(int(c["tp"]) for c in counts)
+    micro_fp = sum(int(c["fp"]) for c in counts)
+    micro_fn = sum(int(c["fn"]) for c in counts)
 
     micro_p = micro_tp / (micro_tp + micro_fp) if (micro_tp + micro_fp) else 0.0
     micro_r = micro_tp / (micro_tp + micro_fn) if (micro_tp + micro_fn) else 0.0
-    macro_p = sum(p_macro) / len(p_macro)
-    macro_r = sum(r_macro) / len(r_macro)
+    micro_f1 = _f1(micro_p, micro_r)
 
-    def _f1(p: float, r: float) -> float:
-        return 2 * p * r / (p + r) if (p + r) else 0.0
+    n = len(counts)
+    macro_p = sum(float(c["precision"]) for c in counts) / n
+    macro_r = sum(float(c["recall"]) for c in counts) / n
+    macro_f1 = sum(float(c["f1"]) for c in counts) / n
 
-    return [
-        EvaluationResult(key="micro_precision", score=micro_p),
-        EvaluationResult(key="micro_recall", score=micro_r),
-        EvaluationResult(key="micro_f1", score=_f1(micro_p, micro_r)),
-        EvaluationResult(key="macro_precision", score=macro_p),
-        EvaluationResult(key="macro_recall", score=macro_r),
-        EvaluationResult(key="macro_f1", score=_f1(macro_p, macro_r)),
-    ]
+    return {
+        "results": [
+            {"key": "micro_precision", "score": micro_p},
+            {"key": "micro_recall", "score": micro_r},
+            {"key": "micro_f1", "score": micro_f1},
+            {"key": "macro_precision", "score": macro_p},
+            {"key": "macro_recall", "score": macro_r},
+            {"key": "macro_f1", "score": macro_f1},
+            {"key": "total_tp", "score": micro_tp},
+            {"key": "total_fp", "score": micro_fp},
+            {"key": "total_fn", "score": micro_fn},
+        ]
+    }
